@@ -132,6 +132,10 @@ def _heuristics(data: IssueData) -> Tuple[bool, bool, Optional[str], bool, Issue
 
 def analyze(data: IssueData, use_sampling: bool = False) -> AnalyzeIssueOutput:
     """Produce an AnalyzeIssueOutput from fetched IssueData."""
+    print(f"[issue_agent] [analyzer] Analyzing issue #{data.number}: '{data.title}'", flush=True)
+    print(f"[issue_agent] [analyzer]   state={data.state}, labels={data.labels}, assignees={data.assignees}, locked={data.locked}", flush=True)
+    print(f"[issue_agent] [analyzer]   comments={len(data.comments)}, linked_prs={len(data.linked_prs)}, open_prs_referencing={len(data.open_prs_referencing)}", flush=True)
+
     (
         actionable,
         already_fixed,
@@ -156,6 +160,9 @@ def analyze(data: IssueData, use_sampling: bool = False) -> AnalyzeIssueOutput:
 
     if not reasons:
         reasons.append("No disqualifying signals found; issue appears actionable.")
+
+    print(f"[issue_agent] [analyzer] Result: actionable={actionable}, already_fixed={already_fixed}, claimed_by={claimed_by}, needs_clarification={needs_clarification}, risk={risk}", flush=True)
+    print(f"[issue_agent] [analyzer]   reasons: {reasons}", flush=True)
 
     return AnalyzeIssueOutput(
         actionable=actionable,

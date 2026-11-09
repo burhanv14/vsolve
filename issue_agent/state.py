@@ -109,6 +109,7 @@ class WorkspaceState:
                 f"Allowed from {self.state.value}: "
                 + ", ".join(s.value for s in _TRANSITIONS.get(self.state, frozenset()))
             )
+        print(f"[issue_agent] [state] Transition: {self.state.value} -> {new_state.value} (issue: {self.issue_url})", flush=True)
         self.state = new_state
         self.save()
         return ""
