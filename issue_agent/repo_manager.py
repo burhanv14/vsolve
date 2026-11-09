@@ -62,7 +62,9 @@ class RepoManager:
     def __init__(self) -> None:
         self.token = config.github_token
         if not self.token:
+            print("[issue_agent] [repo_manager] ERROR: GITHUB_TOKEN is not set", flush=True)
             raise RepoManagerError("GITHUB_TOKEN is not set")
+        print("[issue_agent] [repo_manager] RepoManager initialized", flush=True)
 
     # ----- setup / sync -----
     def prepare(
@@ -71,14 +73,18 @@ class RepoManager:
         state: WorkspaceState,
     ) -> RepoInfo:
         """Fork (reuse existing), clone, add upstream, sync, create branch."""
+        print(f"[issue_agent] [repo_manager] prepare() starting for: {issue_url}", flush=True)
         parsed = parse_issue_url(issue_url)
         owner, repo, number = parsed.owner, parsed.repo, parsed.number
 
         # Determine / reuse a fork.
+        print(f"[issue_agent] [repo_manager] Ensuring fork for {owner}/{repo}...", flush=True)
         fork_full_name = self._ensure_fork(owner, repo)
         fork_owner = fork_full_name.split("/", 1)[0]
+        print(f"[issue_agent] [repo_manager] Fork: {fork_full_name} (owner: {fork_owner})", flush=True)
 
         default_branch = get_default_branch(owner, repo)
+        print(f"[issue_agent] [repo_manager] Default branch: {default_branch}", flush=True)
 
         path = workspace_dir(owner, repo, number)
         path.mkdir(parents=True, exist_ok=True)
@@ -86,36 +92,48 @@ class RepoManager:
         # Clone into workspace (reuse if already present).
         clone_url = f"https://x-access-token:{self.token}@github.com/{fork_full_name}.git"
         if self._is_valid_repo(path):
+            print(f"[issue_agent] [repo_manager] Reusing existing repo at {path}", flush=True)
             repo_obj = Repo(path)
             # ensure remotes
             self._ensure_remotes(repo_obj, owner, repo, fork_full_name)
         else:
             # clean stale partial dir
             if any(path.iterdir()):
+                print(f"[issue_agent] [repo_manager] Cleaning stale partial dir at {path}", flush=True)
                 shutil.rmtree(path)
                 path.mkdir(parents=True, exist_ok=True)
+            print(f"[issue_agent] [repo_manager] Initializing new repo at {path}", flush=True)
+            print(f"[issue_agent] [repo_manager] Cloning from {clone_url}...", flush=True)
             repo_obj = Repo.init(path)
             origin = repo_obj.create_remote("origin", clone_url)
             origin.fetch()
+            print(f"[issue_agent] [repo_manager] Fetch complete.", flush=True)
             repo_obj.create_head(default_branch, origin.refs[default_branch])
             repo_obj.heads[default_branch].checkout()
             repo_obj.create_remote("upstream", f"https://github.com/{owner}/{repo}.git")
+            print(f"[issue_agent] [repo_manager] Remotes origin/upstream configured.", flush=True)
 
         # Sync with upstream's default branch.
+        print(f"[issue_agent] [repo_manager] Syncing with upstream/{default_branch}...", flush=True)
         self._sync_with_upstream(repo_obj, owner, repo, default_branch)
+        print(f"[issue_agent] [repo_manager] Sync complete.", flush=True)
 
         # Create feature branch fix/<issue#>-<slug>
         issue = self._fetch_issue_title(issue_url)
         branch = f"fix/{number}-{slugify(issue)}"
+        print(f"[issue_agent] [repo_manager] Creating feature branch: {branch}", flush=True)
         if branch in [h.name for h in repo_obj.heads]:
             repo_obj.heads[branch].checkout()
+            print(f"[issue_agent] [repo_manager] Checked out existing branch {branch}", flush=True)
         else:
             repo_obj.create_head(branch).checkout()
+            print(f"[issue_agent] [repo_manager] Created and checked out branch {branch}", flush=True)
 
         state.branch = branch
         state.workspace_path = str(path)
         state.default_branch = default_branch
         state.transition_to(WorkflowState.PREPARED)
+        print(f"[issue_agent] [repo_manager] prepare() complete. Workspace: {path}", flush=True)
 
         return RepoInfo(
             owner=owner,
@@ -172,20 +190,25 @@ class RepoManager:
 
     def commit(self, workspace_path: str, message: str) -> str:
         """Stage all changes and commit. Returns the commit SHA."""
+        print(f"[issue_agent] [repo_manager] commit() staging all changes in {workspace_path}", flush=True)
         repo_obj = Repo(workspace_path)
         repo_obj.git.add("-A")
         if not repo_obj.is_dirty(untracked_files=True) and not repo_obj.index.diff("HEAD"):
             # nothing to commit unless untracked exist
             if not repo_obj.untracked_files:
+                print(f"[issue_agent] [repo_manager] commit() no changes to commit", flush=True)
                 raise RepoManagerError("No changes to commit")
         commit = repo_obj.index.commit(message)
+        print(f"[issue_agent] [repo_manager] commit() created commit {commit.hexsha[:8]}: {message}", flush=True)
         return commit.hexsha
 
     def push(self, workspace_path: str, branch: str) -> None:
         """Push the branch to origin (the fork) only. Never upstream, never force."""
+        print(f"[issue_agent] [repo_manager] push() pushing branch '{branch}' to origin (fork)...", flush=True)
         repo_obj = Repo(workspace_path)
         origin = repo_obj.remote("origin")
         origin.push(refspec=f"{branch}:{branch}", force=False)
+        print(f"[issue_agent] [repo_manager] push() complete.", flush=True)
 
     # ----- cleanup -----
     def cleanup(self, workspace_path: str) -> None:
@@ -193,6 +216,7 @@ class RepoManager:
         if not self._is_within_root(p):
             raise RepoManagerError(f"Refusing to remove path outside WORKSPACE_ROOT: {p}")
         if p.exists():
+            print(f"[issue_agent] [repo_manager] cleanup() removing {workspace_path}", flush=True)
             shutil.rmtree(p, ignore_errors=True)
 
     # ----- internals -----
@@ -219,6 +243,7 @@ class RepoManager:
             repo_obj.remotes.upstream.set_url(upstream_url)
 
     def _sync_with_upstream(self, repo_obj: Repo, owner: str, repo: str, branch: str) -> None:
+        print(f"[issue_agent] [repo_manager] _sync_with_upstream: fetching {branch} from upstream", flush=True)
         upstream = repo_obj.remote("upstream")
         upstream.fetch(branch)
         try:
@@ -231,12 +256,15 @@ class RepoManager:
         repo_obj.git.checkout(branch)
         try:
             repo_obj.git.merge("--ff-only", f"upstream/{branch}")
+            print(f"[issue_agent] [repo_manager] _sync_with_upstream: fast-forward merge succeeded", flush=True)
         except GitCommandError:
+            print(f"[issue_agent] [repo_manager] _sync_with_upstream: merge failed, resetting hard to upstream/{branch}", flush=True)
             # If merge fails, reset hard to upstream (safe: we haven't committed feature work yet)
             repo_obj.git.reset("--hard", f"upstream/{branch}")
 
     def _ensure_fork(self, owner: str, repo: str) -> str:
         """Return fork full_name (fork_owner/repo), creating one if needed."""
+        print(f"[issue_agent] [repo_manager] _ensure_fork: checking for fork {owner}/{repo}", flush=True)
         gh = get_github()
         viewer = gh.get_user()
         login = viewer.login
@@ -245,11 +273,13 @@ class RepoManager:
         # Check whether the fork already exists.
         try:
             gh.get_repo(fork_full_name)
+            print(f"[issue_agent] [repo_manager] _ensure_fork: fork already exists: {fork_full_name}", flush=True)
             return fork_full_name
         except Exception:
             pass
 
         # Create the fork.
+        print(f"[issue_agent] [repo_manager] _ensure_fork: creating fork {fork_full_name}...", flush=True)
         source = gh.get_repo(f"{owner}/{repo}")
         try:
             fork = source.create_fork()
@@ -258,6 +288,7 @@ class RepoManager:
             for _ in range(10):
                 try:
                     gh.get_repo(fork_full_name)
+                    print(f"[issue_agent] [repo_manager] _ensure_fork: fork ready: {fork_full_name}", flush=True)
                     return fork_full_name
                 except Exception:
                     time.sleep(1)

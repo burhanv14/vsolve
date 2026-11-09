@@ -40,10 +40,12 @@ def parse_issue_url(url: str) -> ParsedIssue:
     """Parse a GitHub issue URL into its components."""
     m = ISSUE_URL_RE.match(url.strip())
     if not m:
+        print(f"[issue_agent] [github] Failed to parse issue URL: {url!r}", flush=True)
         raise GitHubError(
             f"Unsupported issue URL: {url!r}. Expected "
             "https://github.com/<owner>/<repo>/issues/<number>"
         )
+    print(f"[issue_agent] [github] Parsed issue URL: {m.group('owner')}/{m.group('repo')}#{m.group('number')}", flush=True)
     return ParsedIssue(
         owner=m.group("owner"),
         repo=m.group("repo"),
@@ -56,22 +58,29 @@ def get_github() -> Github:
     """Build an authenticated PyGithub client from config."""
     token = config.github_token
     if not token:
+        print("[issue_agent] [github] ERROR: GITHUB_TOKEN is not set", flush=True)
         raise GitHubError(
             "GITHUB_TOKEN is not set. Create a personal access token and add it "
             "to .env (see README for required scopes)."
         )
+    print(f"[issue_agent] [github] Building GitHub client (base_url={config.github_api_base_url})", flush=True)
     return Github(login_or_token=token, base_url=config.github_api_base_url)
 
 
 def fetch_issue(url: str) -> Issue:
     gh = get_github()
     parsed = parse_issue_url(url)
+    print(f"[issue_agent] [github] Fetching issue {url} from GitHub API...", flush=True)
     try:
         repo = gh.get_repo(f"{parsed.owner}/{parsed.repo}")
-        return repo.get_issue(number=parsed.number)
+        issue = repo.get_issue(number=parsed.number)
+        print(f"[issue_agent] [github] Fetched issue #{issue.number}: '{issue.title}' (state={issue.state})", flush=True)
+        return issue
     except RateLimitExceededException as exc:
+        print(f"[issue_agent] [github] GitHub rate limit exceeded: {exc}", flush=True)
         raise GitHubError(f"GitHub rate limit exceeded: {exc}") from exc
     except GithubException as exc:
+        print(f"[issue_agent] [github] GitHub API error fetching issue {url}: {exc.status} {exc.data}", flush=True)
         raise GitHubError(
             f"GitHub API error fetching issue {url}: {exc.status} {exc.data}"
         ) from exc
@@ -79,9 +88,13 @@ def fetch_issue(url: str) -> Issue:
 
 def fetch_repo(owner: str, repo: str) -> Repository:
     gh = get_github()
+    print(f"[issue_agent] [github] Fetching repo {owner}/{repo} from GitHub API...", flush=True)
     try:
-        return gh.get_repo(f"{owner}/{repo}")
+        r = gh.get_repo(f"{owner}/{repo}")
+        print(f"[issue_agent] [github] Fetched repo {owner}/{repo} (default_branch={r.default_branch})", flush=True)
+        return r
     except GithubException as exc:
+        print(f"[issue_agent] [github] GitHub API error fetching repo {owner}/{repo}: {exc.status} {exc.data}", flush=True)
         raise GitHubError(
             f"GitHub API error fetching repo {owner}/{repo}: {exc.status} {exc.data}"
         ) from exc
@@ -113,6 +126,7 @@ def gather_issue_data(url: str) -> IssueData:
     parsed = parse_issue_url(url)
     repo = issue.repository
 
+    print(f"[issue_agent] [github] Gathering labels, assignees, comments for issue #{issue.number}...", flush=True)
     labels = [l.name for l in issue.get_labels()]
     assignees = [a.login for a in issue.get_assignees()]
     comments = [
@@ -124,6 +138,7 @@ def gather_issue_data(url: str) -> IssueData:
         }
         for c in issue.get_comments()
     ]
+    print(f"[issue_agent] [github]   labels={labels}, assignees={assignees}, comments={len(comments)}", flush=True)
 
     # PRs linked in the issue body (e.g. "fixes #12" or a PR URL).
     linked_prs: List[dict] = []
@@ -233,10 +248,13 @@ def create_pull_request(
     ``head`` must be a fork branch (e.g. ``forkowner:branch``). Never force-push
     is handled at the git layer; here we just open the PR.
     """
+    print(f"[issue_agent] [github] Creating PR: {head} -> {base} in {owner}/{repo}", flush=True)
+    print(f"[issue_agent] [github]   PR title: {title}", flush=True)
     gh = get_github()
     repository = gh.get_repo(f"{owner}/{repo}")
     try:
         pr = repository.create_pull(title=title, body=body, head=head, base=base)
+        print(f"[issue_agent] [github] PR created: #{pr.number} {pr.html_url}", flush=True)
         return {
             "number": pr.number,
             "url": pr.html_url,
@@ -245,6 +263,7 @@ def create_pull_request(
             "base": pr.base.ref,
         }
     except GithubException as exc:
+        print(f"[issue_agent] [github] Failed to create PR: {exc.status} {exc.data}", flush=True)
         raise GitHubError(
             f"Failed to create PR: {exc.status} {exc.data}"
         ) from exc
@@ -252,6 +271,7 @@ def create_pull_request(
 
 def get_default_branch(owner: str, repo: str) -> str:
     repository = fetch_repo(owner, repo)
+    print(f"[issue_agent] [github] Default branch for {owner}/{repo}: {repository.default_branch}", flush=True)
     return repository.default_branch
 
 
