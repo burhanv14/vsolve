@@ -53,6 +53,8 @@ def run_command(
     max_bytes = max_output_bytes or config.max_output_bytes
     env = scrub_env()
 
+    print(f"[issue_agent] [sandbox] Running command in {cwd}: {command}", flush=True)
+
     try:
         proc = subprocess.run(
             shlex.split(command),
@@ -66,6 +68,7 @@ def run_command(
         out = (exc.stdout or b"") + (exc.stderr or b"")
         text = out.decode("utf-8", errors="replace")
         truncated = len(text) > max_bytes
+        print(f"[issue_agent] [sandbox] Command timed out after {timeout}s: {command}", flush=True)
         return CommandResult(
             command=command,
             return_code=-1,
@@ -79,6 +82,10 @@ def run_command(
     log = combined[:max_bytes] if max_bytes and len(combined) > max_bytes else combined
     if truncated:
         log += "\n...[output truncated]..."
+
+    print(f"[issue_agent] [sandbox] Command finished: return_code={proc.return_code if hasattr(proc, 'return_code') else proc.returncode}", flush=True)
+    if log:
+        print(f"[issue_agent] [sandbox] Output (first 500 chars): {log[:500]}", flush=True)
 
     return CommandResult(
         command=command,

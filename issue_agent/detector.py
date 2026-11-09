@@ -100,6 +100,8 @@ def detect_language(workspace_path: str) -> DetectionResult:
     scores: dict = {}
     signals_found: list = []
 
+    print(f"[issue_agent] [detector] Scanning workspace for language signals: {workspace_path}", flush=True)
+
     # Scan top-level files and extensions (bounded walk).
     for dirpath, dirnames, filenames in os.walk(root):
         # prune heavy dirs
@@ -122,6 +124,7 @@ def detect_language(workspace_path: str) -> DetectionResult:
                     scores[lang] = scores.get(lang, 0) + 1
 
     if not scores:
+        print(f"[issue_agent] [detector] No language signals found; returning 'unknown'", flush=True)
         return DetectionResult(
             language="unknown",
             test_command=None,
@@ -132,6 +135,8 @@ def detect_language(workspace_path: str) -> DetectionResult:
 
     language = max(scores, key=scores.get)
     cmds = COMMANDS.get(language, {})
+    print(f"[issue_agent] [detector] Detected language: {language} (signals: {signals_found})", flush=True)
+    print(f"[issue_agent] [detector]   test={cmds.get('test') or None}, lint={cmds.get('lint') or None}, format={cmds.get('format') or None}", flush=True)
     return DetectionResult(
         language=language,
         test_command=cmds.get("test") or None,
