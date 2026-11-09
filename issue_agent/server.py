@@ -109,10 +109,12 @@ store = SessionStore()
 def _require_reachable(token: str, owner: str, repo: str) -> None:
     """Guardrail: only operate on repos reachable by the token."""
     if not token:
+        print(f"[issue_agent] [guardrail] GITHUB_TOKEN is not set; cannot access GitHub.", flush=True)
         raise GitHubError("GITHUB_TOKEN is not set; cannot access GitHub.")
     # A lightweight reachability check: fetch the repo.
     from .github_client import fetch_repo
 
+    print(f"[issue_agent] [guardrail] Checking reachability of {owner}/{repo}...", flush=True)
     fetch_repo(owner, repo)
 
 
@@ -181,9 +183,11 @@ async def analyze_issue(
     Fetches the issue, comments, labels, assignees, linked/open PRs, and
     CONTRIBUTING.md. Returns a verdict plus reasons. Sets state to ANALYZED.
     """
+    print(f"[issue_agent] [analyze_issue] Starting analysis for: {inp.url}", flush=True)
     try:
         parsed = parse_issue_url(inp.url)
     except GitHubError as exc:
+        print(f"[issue_agent] [analyze_issue] Failed to parse URL: {exc}", flush=True)
         logger.warning("analyze_issue bad URL: %s", exc)
         return AnalyzeIssueOutput(
             actionable=False,
@@ -196,11 +200,15 @@ async def analyze_issue(
         )
 
     owner, repo = parsed.owner, parsed.repo
+    print(f"[issue_agent] [analyze_issue] Parsed URL: owner={owner}, repo={repo}, number={parsed.number}", flush=True)
     _require_reachable(config.github_token, owner, repo)
 
     try:
+        print(f"[issue_agent] [analyze_issue] Fetching issue data from GitHub...", flush=True)
         data = gather_issue_data(inp.url)
+        print(f"[issue_agent] [analyze_issue] Fetched issue #{data.number}: '{data.title}' (state={data.state}, labels={data.labels})", flush=True)
     except GitHubError as exc:
+        print(f"[issue_agent] [analyze_issue] GitHub fetch failed: {exc}", flush=True)
         logger.warning("analyze_issue fetch failed: %s", exc)
         return AnalyzeIssueOutput(
             actionable=False,
@@ -214,7 +222,10 @@ async def analyze_issue(
 
     from .analyzer import analyze as analyze_heuristics
 
+    print(f"[issue_agent] [analyze_issue] Running actionability heuristics...", flush=True)
     output = analyze_heuristics(data, use_sampling=use_sampling and ctx is not None)
+    print(f"[issue_agent] [analyze_issue] Verdict: actionable={output.actionable}, risk={output.risk}, needs_clarification={output.needs_clarification}", flush=True)
+    print(f"[issue_agent] [analyze_issue] Reasons: {output.reasons}", flush=True)
 
     # Guardrail: refuse if claiming signals present (already handled by heuristics).
     state = store.get(inp.url)
@@ -224,7 +235,10 @@ async def analyze_issue(
     state.extra["_actionable"] = str(output.actionable)
     err = state.transition_to(WorkflowState.ANALYZED)
     if err:
+        print(f"[issue_agent] [analyze_issue] State transition warning: {err}", flush=True)
         logger.warning("analyze_issue state transition: %s", err)
+    else:
+        print(f"[issue_agent] [analyze_issue] State transitioned to ANALYZED", flush=True)
 
     logger.info(
         "analyze_issue %s actionable=%s risk=%s reasons=%d",
@@ -248,26 +262,37 @@ async def prepare_workspace(
 
     Requires state ANALYZED with actionable=true. Sets state to PREPARED.
     """
+    print(f"[issue_agent] [prepare_workspace] Starting for: {inp.url}", flush=True)
     state = store.get(inp.url)
     err = require_state(state.state, WorkflowState.ANALYZED, "prepare_workspace")
     if err:
+        print(f"[issue_agent] [prepare_workspace] State check failed: {err}", flush=True)
         return _prepare_error(err)
 
     try:
         parsed = parse_issue_url(inp.url)
     except GitHubError as exc:
+        print(f"[issue_agent] [prepare_workspace] Failed to parse URL: {exc}", flush=True)
         return _prepare_error(str(exc))
 
     owner, repo, number = parsed.owner, parsed.repo, parsed.number
     if not state.extra.get("_actionable", "true").lower() == "true":
+        print(f"[issue_agent] [prepare_workspace] Issue is not actionable.", flush=True)
         return _prepare_error("Issue is not actionable (previous analyze_issue returned actionable=false).")
 
     _require_reachable(config.github_token, owner, repo)
 
     try:
+        print(f"[issue_agent] [prepare_workspace] Creating RepoManager...", flush=True)
         mgr = RepoManager()
+        print(f"[issue_agent] [prepare_workspace] Calling mgr.prepare()...", flush=True)
         info = mgr.prepare(inp.url, state)
+        print(f"[issue_agent] [prepare_workspace] Workspace ready: {info.workspace_path}", flush=True)
+        print(f"[issue_agent] [prepare_workspace]   branch={info.branch}", flush=True)
+        print(f"[issue_agent] [prepare_workspace]   default_branch={info.default_branch}", flush=True)
+        print(f"[issue_agent] [prepare_workspace]   fork_owner={info.fork_owner}", flush=True)
     except (RepoManagerError, GitHubError) as exc:
+        print(f"[issue_agent] [prepare_workspace] Failed: {exc}", flush=True)
         logger.warning("prepare_workspace failed: %s", exc)
         return _prepare_error(str(exc))
 
@@ -275,7 +300,12 @@ async def prepare_workspace(
     state.extra["fork_owner"] = info.fork_owner
 
     # Detect language + commands.
+    print(f"[issue_agent] [prepare_workspace] Detecting language...", flush=True)
     det = detect_language(info.workspace_path)
+    print(f"[issue_agent] [prepare_workspace]   language={det.language}", flush=True)
+    print(f"[issue_agent] [prepare_workspace]   test_command={det.test_command}", flush=True)
+    print(f"[issue_agent] [prepare_workspace]   lint_command={det.lint_command}", flush=True)
+    print(f"[issue_agent] [prepare_workspace]   format_command={det.format_command}", flush=True)
     try:
         rmap = repo_map(info.workspace_path)
     except ContextError as exc:
@@ -330,25 +360,32 @@ async def get_context(
     # We search across all known sessions' workspaces.
     workspace = _current_workspace(store)
     if not workspace:
+        print(f"[issue_agent] [get_context] No active workspace.", flush=True)
         return GetContextOutput(
             matches=[],
             slices=[],
             truncated=False,
         )
 
+    print(f"[issue_agent] [get_context] Workspace: {workspace}", flush=True)
     root = Path(workspace).resolve()
     if not _is_within_root(root):
         return GetContextOutput(matches=[], slices=[], truncated=False)
 
     if inp.query:
+        print(f"[issue_agent] [get_context] Running ripgrep search for query: {inp.query!r}", flush=True)
         matches, truncated = ripgrep_search(workspace, inp.query, inp.max_bytes)
+        print(f"[issue_agent] [get_context] Search returned {len(matches)} matches (truncated={truncated})", flush=True)
         return GetContextOutput(matches=matches, slices=[], truncated=truncated)
 
     if inp.paths:
+        print(f"[issue_agent] [get_context] Reading file slices: {inp.paths}", flush=True)
         slices, truncated = file_slices(workspace, inp.paths, inp.max_bytes)
+        print(f"[issue_agent] [get_context] Read {len(slices)} slices (truncated={truncated})", flush=True)
         return GetContextOutput(matches=[], slices=slices, truncated=truncated)
 
     # Default: return repo map as a single synthetic match block.
+    print(f"[issue_agent] [get_context] Building repo map...", flush=True)
     try:
         rmap = repo_map(workspace)
     except ContextError:
@@ -387,7 +424,10 @@ async def apply_patch(
     """Apply a unified diff to the workspace. Resets state to PREPARED if it was CHECKS_PASSED."""
     workspace = _current_workspace(store)
     if not workspace:
+        print(f"[issue_agent] [apply_patch] No active workspace.", flush=True)
         return ApplyPatchOutput(applied=False, files_changed=[], message="No active workspace.")
+
+    print(f"[issue_agent] [apply_patch] Applying patch to workspace: {workspace}", flush=True)
 
     state = _state_for_workspace(store, workspace)
     if state:
@@ -396,6 +436,7 @@ async def apply_patch(
     # Validate workspace confinement of the patch itself (paths inside diff).
     try:
         import subprocess
+        print(f"[issue_agent] [apply_patch] Checking patch with 'git apply --check'...", flush=True)
         proc = subprocess.run(
             ["git", "apply", "--check", "--verbose", "--directory", workspace],
             input=inp.diff,
@@ -405,11 +446,14 @@ async def apply_patch(
             env=scrub_env(),
         )
     except FileNotFoundError:
+        print(f"[issue_agent] [apply_patch] git not available.", flush=True)
         return ApplyPatchOutput(applied=False, files_changed=[], message="git not available.")
     except Exception as exc:
+        print(f"[issue_agent] [apply_patch] Patch check failed: {exc}", flush=True)
         return ApplyPatchOutput(applied=False, files_changed=[], message=f"patch check failed: {exc}")
 
     if proc.returncode != 0:
+        print(f"[issue_agent] [apply_patch] Patch did not apply cleanly.", flush=True)
         return ApplyPatchOutput(
             applied=False,
             files_changed=[],
@@ -425,6 +469,7 @@ async def apply_patch(
         env=scrub_env(),
     )
     if proc2.returncode != 0:
+        print(f"[issue_agent] [apply_patch] Patch apply failed.", flush=True)
         return ApplyPatchOutput(
             applied=False,
             files_changed=[],
@@ -440,6 +485,7 @@ async def apply_patch(
     if store_changed:
         store.set(store_changed.issue_url, store_changed)
 
+    print(f"[issue_agent] [apply_patch] Patch applied cleanly to {len(changed)} files: {changed}", flush=True)
     logger.info("apply_patch applied %d files in %s", len(changed), workspace)
     return ApplyPatchOutput(applied=True, files_changed=changed, message="patch applied cleanly")
 
@@ -466,7 +512,10 @@ async def run_checks(
     """
     workspace = _current_workspace(store)
     if not workspace:
+        print(f"[issue_agent] [run_checks] No active workspace.", flush=True)
         return RunChecksOutput(checks_passed=False, results=[])
+
+    print(f"[issue_agent] [run_checks] Running checks in workspace: {workspace}", flush=True)
 
     state = _state_for_workspace(store, workspace)
     if state and state.state not in {WorkflowState.PREPARED, WorkflowState.CHECKS_PASSED}:
@@ -477,6 +526,7 @@ async def run_checks(
     commands: list = []
     if inp.command:
         commands.append(inp.command)
+        print(f"[issue_agent] [run_checks] Using user-specified command: {inp.command}", flush=True)
     else:
         from .detector import detect_language
 
@@ -484,10 +534,12 @@ async def run_checks(
         for cmd in (det.test_command, det.lint_command, det.format_command):
             if cmd:
                 commands.append(cmd)
+        print(f"[issue_agent] [run_checks] Detected commands: {commands}", flush=True)
 
     results: list = []
     all_passed = True
     for cmd in commands:
+        print(f"[issue_agent] [run_checks] Running: {cmd}", flush=True)
         res = run_command(cmd, cwd=workspace)
         results.append(
             CheckResult(
@@ -500,13 +552,21 @@ async def run_checks(
         )
         if res.return_code != 0 or res.timed_out:
             all_passed = False
+            print(f"[issue_agent] [run_checks]   FAILED (return_code={res.return_code}, timed_out={res.timed_out})", flush=True)
+            if res.log:
+                print(f"[issue_agent] [run_checks]   Output: {res.log[:500]}", flush=True)
+        else:
+            print(f"[issue_agent] [run_checks]   PASSED", flush=True)
 
     if all_passed and results:
         state_transition = state
         if state_transition:
             err = state_transition.transition_to(WorkflowState.CHECKS_PASSED)
             if err:
+                print(f"[issue_agent] [run_checks] Transition warning: {err}", flush=True)
                 logger.warning("run_checks transition: %s", err)
+            else:
+                print(f"[issue_agent] [run_checks] State transitioned to CHECKS_PASSED", flush=True)
         store.set(state_transition.issue_url, state_transition) if state_transition else None
 
     logger.info("run_checks %s passed=%s commands=%d", workspace, all_passed, len(results))
@@ -530,13 +590,17 @@ async def commit_and_push(
     """
     workspace = _current_workspace(store)
     if not workspace:
+        print(f"[issue_agent] [commit_and_push] No active workspace.", flush=True)
         return CommitPushOutput(
             committed=False, pushed=False, branch="", diff_stat="",
             message="No active workspace.",
         )
 
+    print(f"[issue_agent] [commit_and_push] Starting commit_and_push for workspace: {workspace}", flush=True)
+
     state = _state_for_workspace(store, workspace)
     if not state:
+        print(f"[issue_agent] [commit_and_push] No state found for workspace.", flush=True)
         return CommitPushOutput(
             committed=False, pushed=False, branch="", diff_stat="",
             message="No state found for workspace.",
@@ -544,6 +608,7 @@ async def commit_and_push(
 
     err = require_state(state.state, WorkflowState.CHECKS_PASSED, "commit_and_push")
     if err:
+        print(f"[issue_agent] [commit_and_push] State check failed: {err}", flush=True)
         return CommitPushOutput(
             committed=False, pushed=False, branch="", diff_stat="", message=err
         )
@@ -553,6 +618,7 @@ async def commit_and_push(
     try:
         mgr = RepoManager()
     except RepoManagerError as exc:
+        print(f"[issue_agent] [commit_and_push] RepoManager error: {exc}", flush=True)
         return CommitPushOutput(
             committed=False, pushed=False, branch="", diff_stat="", message=str(exc)
         )
@@ -560,6 +626,8 @@ async def commit_and_push(
     # Diff stat + line enforcement.
     stat = mgr.diff_stat(workspace)
     nlines = mgr.count_changed_lines(workspace)
+    print(f"[issue_agent] [commit_and_push] Diff stat:\n{stat}", flush=True)
+    print(f"[issue_agent] [commit_and_push] Changed lines: {nlines} (max allowed: {config.max_diff_lines})", flush=True)
     if nlines > config.max_diff_lines:
         return CommitPushOutput(
             committed=False,
@@ -583,6 +651,7 @@ async def commit_and_push(
         response_title="commit_and_push",
     )
     if confirm is not True:
+        print(f"[issue_agent] [commit_and_push] Commit/push declined or not supported by client.", flush=True)
         return CommitPushOutput(
             committed=False,
             pushed=False,
@@ -598,18 +667,24 @@ async def commit_and_push(
     try:
         repo_obj = __import__("git").Repo(workspace)
         conventional = _detect_commit_convention(repo_obj)
+        print(f"[issue_agent] [commit_and_push] Conventional commits detected: {conventional}", flush=True)
     except Exception:
         pass
     owner = state.extra.get("owner", "")
     repo = state.extra.get("repo", "")
     dco = _needs_dco(owner, repo)
+    print(f"[issue_agent] [commit_and_push] DCO required: {dco}", flush=True)
 
     final_msg = _commit_message_with_convention(inp.message, conventional, dco, author)
+    print(f"[issue_agent] [commit_and_push] Final commit message: {final_msg!r}", flush=True)
 
     try:
         sha = mgr.commit(workspace, final_msg)
+        print(f"[issue_agent] [commit_and_push] Committed: {sha[:8]}", flush=True)
         mgr.push(workspace, state.branch or "fix")
+        print(f"[issue_agent] [commit_and_push] Pushed branch {state.branch or 'fix'} to fork.", flush=True)
     except (RepoManagerError, Exception) as exc:  # noqa: BLE001
+        print(f"[issue_agent] [commit_and_push] Commit/push failed: {exc}", flush=True)
         logger.warning("commit_and_push failed: %s", exc)
         return CommitPushOutput(
             committed=False,
@@ -621,7 +696,10 @@ async def commit_and_push(
 
     err = state.transition_to(WorkflowState.PUSHED)
     if err:
+        print(f"[issue_agent] [commit_and_push] Transition warning: {err}", flush=True)
         logger.warning("commit_and_push transition: %s", err)
+    else:
+        print(f"[issue_agent] [commit_and_push] State transitioned to PUSHED", flush=True)
     store.set(state.issue_url, state)
 
     logger.info("commit_and_push %s branch=%s sha=%s", workspace, state.branch, sha)
@@ -650,14 +728,19 @@ async def create_pr(
     """
     workspace = _current_workspace(store)
     if not workspace:
+        print(f"[issue_agent] [create_pr] No active workspace.", flush=True)
         return CreatePROutput(pr_url="", pr_number=0, state="")
+
+    print(f"[issue_agent] [create_pr] Starting create_pr for workspace: {workspace}", flush=True)
 
     state = _state_for_workspace(store, workspace)
     if not state:
+        print(f"[issue_agent] [create_pr] No state found for workspace.", flush=True)
         return CreatePROutput(pr_url="", pr_number=0, state="")
 
     err = require_state(state.state, WorkflowState.PUSHED, "create_pr")
     if err:
+        print(f"[issue_agent] [create_pr] State check failed: {err}", flush=True)
         return CreatePROutput(pr_url="", pr_number=0, state="")
 
     owner = state.extra.get("owner", "")
@@ -677,6 +760,10 @@ async def create_pr(
     head = f"{fork_owner}:{branch}"
     base = state.default_branch or "main"
 
+    print(f"[issue_agent] [create_pr] About to open PR: {head} -> {base}", flush=True)
+    print(f"[issue_agent] [create_pr]   owner={owner}, repo={repo}, issue_number={number}", flush=True)
+    print(f"[issue_agent] [create_pr]   title={inp.title}", flush=True)
+
     # Elicitation: confirm PR creation.
     confirm = await _elicit_confirm(
         ctx,
@@ -687,6 +774,7 @@ async def create_pr(
         response_title="create_pr",
     )
     if confirm is not True:
+        print(f"[issue_agent] [create_pr] PR creation declined or not supported by client.", flush=True)
         return CreatePROutput(
             pr_url="", pr_number=0, state="",
             message="PR creation declined or not supported by client.",
@@ -695,16 +783,21 @@ async def create_pr(
     try:
         result = create_pull_request(owner, repo, inp.title, default_body, head, base)
     except GitHubError as exc:
+        print(f"[issue_agent] [create_pr] Failed to create PR: {exc}", flush=True)
         logger.warning("create_pr failed: %s", exc)
         return CreatePROutput(pr_url="", pr_number=0, state="", message=str(exc))
 
     err = state.transition_to(WorkflowState.PR_OPENED)
     if err:
+        print(f"[issue_agent] [create_pr] Transition warning: {err}", flush=True)
         logger.warning("create_pr transition: %s", err)
+    else:
+        print(f"[issue_agent] [create_pr] State transitioned to PR_OPENED", flush=True)
     state.pr_url = result["url"]
     state.pr_number = result["number"]
     store.set(state.issue_url, state)
 
+    print(f"[issue_agent] [create_pr] PR opened: #{result['number']} {result['url']}", flush=True)
     logger.info("create_pr %s -> PR #%d %s", workspace, result["number"], result["url"])
     return CreatePROutput(
         pr_url=result["url"],
@@ -735,7 +828,10 @@ async def get_status(ctx: Context) -> StatusOutput:
     workspace = _current_workspace(store)
     state = _state_for_workspace(store, workspace) if workspace else None
     if not state:
+        print(f"[issue_agent] [get_status] No active workspace/state.", flush=True)
         return StatusOutput(state=WorkflowState.NEW.value, issue_url="", diff_summary="")
+
+    print(f"[issue_agent] [get_status] Returning status: state={state.state.value}, workspace={workspace}", flush=True)
 
     diff_summary = ""
     if workspace:
@@ -764,7 +860,10 @@ async def cleanup_workspace(ctx: Context) -> CleanupOutput:
     """Delete the active workspace and reset its state to NEW."""
     workspace = _current_workspace(store)
     if not workspace:
+        print(f"[issue_agent] [cleanup_workspace] No active workspace.", flush=True)
         return CleanupOutput(cleaned=False, workspace_path="", message="No active workspace.")
+
+    print(f"[issue_agent] [cleanup_workspace] Cleaning up workspace: {workspace}", flush=True)
 
     state = _state_for_workspace(store, workspace)
     from .repo_manager import RepoManager
@@ -774,7 +873,9 @@ async def cleanup_workspace(ctx: Context) -> CleanupOutput:
         mgr.cleanup(workspace)
         cleaned = True
         message = "workspace deleted"
+        print(f"[issue_agent] [cleanup_workspace] Workspace deleted.", flush=True)
     except RepoManagerError as exc:
+        print(f"[issue_agent] [cleanup_workspace] Cleanup failed: {exc}", flush=True)
         return CleanupOutput(cleaned=False, workspace_path=workspace, message=str(exc))
 
     if state:
@@ -793,7 +894,9 @@ async def cleanup_workspace(ctx: Context) -> CleanupOutput:
 async def _elicit_confirm(ctx: Context, message: str, response_title: str) -> Optional[bool]:
     """Ask the client to confirm via MCP elicitation. Returns True/False/None."""
     if ctx is None:
+        print(f"[issue_agent] [elicit] No context available; skipping elicitation.", flush=True)
         return None
+    print(f"[issue_agent] [elicit] Requesting confirmation: {response_title}", flush=True)
     try:
         from typing import Any
         result = await ctx.elicit(
@@ -805,12 +908,14 @@ async def _elicit_confirm(ctx: Context, message: str, response_title: str) -> Op
         # AcceptedElicitation has .value; Declined/Cancelled are not True.
         accepted = getattr(result, "value", None)
         if isinstance(accepted, bool):
+            print(f"[issue_agent] [elicit] Client responded: {accepted}", flush=True)
             return accepted
         # Some clients return a dict with "value".
         if isinstance(result, dict):
             return bool(result.get("value"))
         return None
     except Exception as exc:
+        print(f"[issue_agent] [elicit] Elicitation not supported or declined: {exc}", flush=True)
         logger.warning("elicitation not supported or declined: %s", exc)
         return None
 
@@ -826,6 +931,7 @@ def main() -> None:
         config.port,
         config.path,
     )
+    print(f"[issue_agent] Starting MCP server on http://{config.host}:{config.port}{config.path}", flush=True)
     app.run(
         transport="http",
         host=config.host,
