@@ -430,8 +430,28 @@ async def apply_patch(
     print(f"[issue_agent] [apply_patch] Applying patch to workspace: {workspace}", flush=True)
 
     state = _state_for_workspace(store, workspace)
-    if state:
-        state.reset_to_prepared()
+    if not state:
+        print(f"[issue_agent] [apply_patch] No state found for workspace.", flush=True)
+        return ApplyPatchOutput(
+            applied=False, files_changed=[], message="No state found for workspace."
+        )
+
+    if state.state not in {WorkflowState.PREPARED, WorkflowState.CHECKS_PASSED}:
+        print(
+            f"[issue_agent] [apply_patch] State check failed: current={state.state.value}",
+            flush=True,
+        )
+        return ApplyPatchOutput(
+            applied=False,
+            files_changed=[],
+            message=(
+                f"apply_patch requires state PREPARED or CHECKS_PASSED, but current state is "
+                f"{state.state.value}."
+            ),
+        )
+
+    # Editing after CHECKS_PASSED resets to PREPARED; no-op if already PREPARED.
+    state.reset_to_prepared()
 
     # Validate workspace confinement of the patch itself (paths inside diff).
     try:
