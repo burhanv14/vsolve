@@ -201,13 +201,3 @@ Editing files after `CHECKS_PASSED` resets state to `PREPARED`.
 uv sync --extra dev
 uv run pytest
 ```
-
-## Open questions
-
-- Elicitation depends on the MCP client supporting it; if a client doesn't,
-  `commit_and_push`/`create_pr` return a "declined or not supported" result
-  rather than acting.
-- PyGithub is used for GitHub access; an `httpx`-against-REST fallback could
-  be added to reduce dependency weight.
-- Fork creation hits the GitHub API each time a fresh fork is needed; there is
-  a small propagation wait after creating a fork before it's usable.
